@@ -1,0 +1,147 @@
+# What's inside the `<script>` section
+
+Short answer: **one part of it really is encoded, and the rest only looks encoded because it's written on
+extremely long lines.** Neither part is obfuscated or minified — it's ordinary JavaScript and ordinary data,
+just formatted for compactness rather than for reading.
+
+There are two different files involved, and they look strange for two different reasons.
+
+---
+
+## 1. The outer file (`index.html` / `HudsonCounty_AllYears.html`)
+
+This file is only **81 lines long**. Eighty of them are perfectly readable. The problem is line 45:
+
+```
+line 45   9,471,041 characters   const MAPS={"jc": {"2013": "PCFET0NUWVBFIGh0bWw+CjxodG1sIGxhbmc9…
+```
+
+That single line is **9.4 million characters of Base64** — so yes, your instinct was right, this part is
+genuinely encoded. Base64 is not encryption; it's a way of writing arbitrary text using only letters,
+digits, `+` and `/`. Every browser can decode it in one function call, and so can you.
+
+**What's encoded:** the ten complete year-pages — Jersey City 2013/2017/2021/2025 and Hoboken
+2015/2017/2019/2021/2023/2025. Each is a whole standalone HTML document, encoded to a string and stored
+in the `MAPS` object.
+
+**Why:** you asked for single self-contained files. An HTML file can't contain another raw HTML document
+inside a variable — the inner `</script>` and `</html>` tags would terminate the outer file early and
+break it. Encoding sidesteps that. It also keeps each year isolated: they're loaded into an `<iframe>`,
+so ten separate maps with identically-named variables can coexist without colliding.
+
+**To see it for yourself,** paste this into your browser's console with the file open:
+
+```js
+// prints the Hoboken 2025 page as normal, readable HTML
+console.log(b64ToStr(MAPS.hob['2025']))
+```
+
+or, to save it as its own file:
+
+```js
+const blob = new Blob([b64ToStr(MAPS.jc['2025'])], {type:'text/html'});
+window.open(URL.createObjectURL(blob));   // opens that year as a standalone page
+```
+
+### The 35 readable lines
+
+Everything after line 45 is the whole outer program:
+
+| Lines | What it does |
+|---|---|
+| 46–47 | `YEARS` — which years each town has. `DEFAULT_YEAR` — where to start. |
+| 48–49 | Grabs the iframe and the "Loading map…" element; remembers the current town/year. |
+| 50 | `b64ToStr()` — the Base64 decoder. Three lines: decode, copy to a byte array, read as UTF-8. |
+| 51–57 | `renderYears()` — draws the year buttons for the selected town and scrolls the active one into view. |
+| 58–68 | `showMap()` — the core. Highlights the chosen buttons, then **line 67** decodes that year's page and hands it to the iframe via `srcdoc`. That one line is the whole "load a map" mechanism. |
+| 69–73 | `pickTown()` — when you switch town, keep the same year if that town also has it, otherwise fall back to its default. |
+| 74–77 | Wire up the buttons; hide the loading message when the frame finishes; open on Jersey City 2025. |
+
+That's the entire outer file. It is a menu and a loader — it contains no mapping logic at all.
+
+---
+
+## 2. Inside one year page
+
+Decode any year and you get a normal HTML document — but it has the same "wall of characters" problem
+for a *different* reason. For Jersey City 2025:
+
+```
+558 lines total
+line 125    3,816,858 characters    const DATA = {"MAYOR_FEATS": [{"type":"Feature","geometry": …
+```
+
+This one is **not encoded** — it's plain JSON, just all on one line. It is **99.1% of the file**, and
+it's entirely data, not instructions:
+
+* the **boundary polygon of every voting district**, as long lists of longitude/latitude pairs
+  (`[-74.10465, 40.71563], [-74.10471, 40.71559], …`) — this is what makes it so enormous; a single
+  district outline can be hundreds of coordinate pairs
+* the **vote count for every candidate in every district**, plus ballots cast and registered voters
+* the **official summary totals** for each contest
+
+The remaining **433 lines are the actual program**, and they're readable once indented. I've done that
+for you — see `JerseyCity_2025_logic.js` and `Hoboken_2025_logic.js`, which are the real code with the
+data blob removed, re-indented, and commented, with an index of every function at the top.
+
+### How the program is organised
+
+It's a small **state machine**. One object records what you're looking at:
+
+```js
+let state = { race:'mayor', ward:null, view:'margin', sub:'pct' };
+```
+
+Every button does the same two things: change one field in `state`, then call `draw()`. `draw()` rebuilds
+the screen from scratch each time. There's no incremental updating, which is why the code stays simple.
+
+The 433 lines fall into six groups:
+
+**1. Colour maths (~60 lines).** `lerp3()` blends two colours. `accentT()` converts a vote share into a
+blend amount on the deliberately non-linear curve we tuned. `RANKPAL` is the fifteen-colour palette —
+this array is where 1st place orange, 2nd blue, 3rd magenta, 4th violet live. `computeRanks()` sorts
+candidates by their official total and caches the result, which is what makes a candidate's colour
+identical on the map, in the legend and in the results list.
+
+**2. Map setup (~5 lines).** Creates the Leaflet map and adds the two CartoDB basemap layers.
+
+**3. Reading the data (~30 lines).** Small helpers — `currentCands()`, `currentFeatures()`,
+`currentSummary()` — that answer "given the current `state`, which slice of `DATA` do I need?" This is
+where general-vs-runoff and citywide-vs-ward get resolved.
+
+**4. Building the controls (~70 lines).** `raceButtons()`, `renderWardSeg()`, `renderViewSeg()`,
+`renderSubSeg()` draw the button rows. `availableViews()` is the one with real logic: it decides that
+Turnout only appears when registered-voter counts exist, and Runoff only when that contest had one.
+
+**5. The small-multiples grid (~90 lines).** `featBBox()`, `pathFor()` and `centroidFor()` project the
+district polygons into hand-drawn SVG (Leaflet isn't used here — these are tiny static maps).
+`buildGrid()` assembles one mini-map per candidate.
+
+**6. Drawing (~180 lines).** `draw()` is the conductor. `styleFor()` picks each district's fill colour
+for the active view; `tooltipFor()` builds the hover box; `updateHeader()`, `updateLegend()` and
+`updateSummary()` refresh the three text panels.
+
+---
+
+## Reading it yourself
+
+To pretty-print any of it, paste the script into your browser console, or use a formatter. From a
+terminal:
+
+```bash
+npx js-beautify --indent-size 2 yourfile.html
+```
+
+Two things worth knowing if you want to satisfy yourself nothing odd is in there:
+
+* **The only external addresses in the whole file** are `cdnjs.cloudflare.com` (the Leaflet mapping
+  library) and `cartodb-basemaps-*` (the grey street tiles behind the districts). You can confirm with
+  `grep -o 'https\?://[a-z.-]*' index.html | sort -u`.
+* **The code makes no network requests of its own and stores nothing.** There is no `fetch(`, no
+  `XMLHttpRequest`, no `eval(`, no `new Function`, no `localStorage`, no cookies — I checked all of them
+  and every count is zero. `atob()` (the Base64 decoder) appears only in the outer file, only in
+  `b64ToStr()`, and only ever reads from the `MAPS` object already inside the file. Once the page has
+  loaded Leaflet and the map tiles, everything happens locally in your browser.
+
+The one thing that *is* used is `innerHTML`, six or seven times, to write the legend and results panels
+from your own election numbers.
